@@ -1,30 +1,54 @@
-#include <cubozoa_ecs/cubozoa_ecs.h>
+#include <cbz_ecs/cbz_ecs.h>
+#include <cbz_ecs/cbz_ecs_types.h>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
-static std::shared_ptr<spdlog::logger> sLogger;
+void Transform::setParent(cbz::ecs::Entity parentId) {
+  cbz::ecs::Entity parent(parentId);
+
+  if (!parent.hasComponent<Transform>()) {
+    spdlog::error(
+        "Attempting to parent to entity without transfrom component!");
+  }
+
+  mDepth = parent.getComponent<Transform>().mDepth + 1;
+  mParent = parentId;
+}
 
 namespace cbz::ecs {
+
+uint8_t GenerateNextComponentId() {
+  static uint8_t sComponentCount = 0;
+  return sComponentCount++;
+}
 
 ArchetypeContainer::Iterator::Iterator(uint8_t *dataPtr,
                                        ArchetypeContainer *container)
     : mPtr(dataPtr), mContainer(container) {}
 
-void ArchetypeContainer::init() {}
+void ArchetypeContainer::init(IWorld *world) {
+  mWorld = world;
+  // Prepend archetype with entityID
+  addArchetypeType(GetComponentId<Entity>(), sizeof(Entity), alignof(Entity));
+}
 
 void ArchetypeContainer::addArchetypeType(ComponentId componentId,
-                                          uint32_t size) {
+                                          uint32_t size, uint32_t alignment) {
+  // Ensure next offset fits with allignment
+  mArchetypeWholeSize =
+      (mArchetypeWholeSize + alignment - 1) & ~(alignment - 1);
+
   mTypeSizes[componentId] = size;
   mTypeOffsets[componentId] = mArchetypeWholeSize;
 
   mArchetypeWholeSize += size;
-
-  mID.set(componentId);
+  mComponentMask.set(componentId);
 }
 
 void ArchetypeContainer::fini() {
-  // TODO : Check Alignment
+  // Enforce 8 byte allignment
+  mArchetypeWholeSize = (mArchetypeWholeSize + 7) & ~7;
 }
 
 ArchetypeContainer::Iterator ArchetypeContainer::begin() {
@@ -58,43 +82,61 @@ uint32_t ArchetypeContainer::getTypeOffset(ComponentId id) const {
   return 0;
 }
 
+uint32_t ArchetypeContainer::getComponentCount() const {
+  return static_cast<uint32_t>(mTypeSizes.size());
+}
+
 void *ArchetypeContainer::getComponent(EntityId eId, ComponentId componentId) {
   const size_t offset = (getEntityArchetypeIndex(eId) * mArchetypeWholeSize) +
                         mTypeOffsets[componentId];
   return static_cast<uint8_t *>(mArchetypeBuffer.data()) + offset;
 }
 
-void *ArchetypeContainer::pushComponent(EntityId eId, ComponentId componentId,
-                                        void *data) {
+void *ArchetypeContainer::pushComponent(cbz::ecs::EntityId eId,
+                                        ComponentId componentId, void *data) {
   // Increment only if does not exist
   if (mEntityIndex.find(eId) == mEntityIndex.end()) {
     mEntityIndex[eId] = mCount++;
   }
 
-  const size_t offset =
+  const size_t globalComponentOffset =
       (mEntityIndex[eId] * mArchetypeWholeSize) + mTypeOffsets[componentId];
 
-  if (offset >= mArchetypeBuffer.size()) {
-    // Guarantee free slot at end for pop swap
+  if (globalComponentOffset >= mArchetypeBuffer.size()) {
+    // Guarantee free 'temp' slot at end for pop swap
     mArchetypeBuffer.resize(
         (((mEntityIndex[eId] + 1) * mArchetypeWholeSize) * 2) +
         mArchetypeWholeSize);
   }
 
-  void *out = mArchetypeBuffer.data() + offset;
+  // Preprend entity
+  // Entity is always the first component in the archetype
+  Entity e(eId, mWorld);
+  memcpy(mArchetypeBuffer.data() + (mEntityIndex[eId] * mArchetypeWholeSize),
+         &e, sizeof(cbz::ecs::Entity));
+
+  // Copy component data
+  void *out = mArchetypeBuffer.data() + globalComponentOffset;
   memcpy(out, data, mTypeSizes[componentId]);
+
   return out;
 };
 
 void *ArchetypeContainer::popArchetype(EntityId eId) {
   if (mCount == 0) {
-    sLogger->error("Attempting to remove component; Entity has no component!");
+    spdlog::error("Attempting to remove component; Entity has no component!");
     return nullptr;
   }
 
   const size_t offsetToFree =
       (getEntityArchetypeIndex(eId) * mArchetypeWholeSize);
   const size_t tempOffset = (mCount * mArchetypeWholeSize);
+
+  // Guarantee required size
+  const size_t requiredSize = (mCount + 1) * mArchetypeWholeSize;
+  if (mArchetypeBuffer.size() < requiredSize) {
+    mArchetypeBuffer.resize(requiredSize);
+  }
 
   // Store in archetype free 'count' offset
   memcpy(mArchetypeBuffer.data() + tempOffset,
@@ -117,7 +159,7 @@ void *ArchetypeContainer::popArchetype(EntityId eId) {
 uint32_t ArchetypeContainer::getEntityArchetypeIndex(EntityId eId) const {
   auto it = mEntityIndex.find(eId);
   if (it == mEntityIndex.end()) {
-    sLogger->error("Entity has no such component!");
+    spdlog::error("Entity has no such component!");
     return -1;
   }
 
@@ -126,7 +168,15 @@ uint32_t ArchetypeContainer::getEntityArchetypeIndex(EntityId eId) const {
 
 class World : public cbz::ecs::IWorld {
 public:
-  EntityId create(const char *name) override {
+  World() = default;
+  ~World() = default;
+
+  Entity instantiate(const char *name) override {
+    if (mEntityDescs.size() >= MAX_ENTITIES) {
+      spdlog::error("Exceeded max entities");
+      return {INVALID_ENTITY_ID, this};
+    }
+
     EntityId id = mEntityDescs.size();
     mEntityDescs.push_back({});
 
@@ -134,39 +184,51 @@ public:
       mEntityDescs.back().name = name;
     }
 
-    return id;
+    return {id, this};
   }
 
-  // template <typename... Ts, typename Fn> void query(Fn &&fn) {
-  //   ArchetypeMask archetypeId = hashAll<Ts...>();
-  //
-  //   auto archetypeIt = mArchetypes.find(archetypeId);
-  //   if (archetypeIt == mArchetypes.end())
-  //     return;
-  //
-  //   ArchetypeContainer &container = archetypeIt->second;
-  //
-  //   for (auto it = container.begin(); it != container.end(); ++it) {
-  //     fn(it.template as<Ts>()...);
-  //   }
-  // }
+  void step(double _) override {
+    for (auto &systemFn : mySystems) {
+      systemFn();
+    }
+  };
 
-  // TODO: Impl
-  void destroy(EntityId _) override {};
+  void destroy(EntityId eId) override {
+    if (mArchetypes.find(mEntityDescs[eId].componentMask) ==
+        mArchetypes.end()) {
+      return;
+    }
+
+    mArchetypes[mEntityDescs[eId].componentMask].popArchetype(eId);
+  };
 
   const char *getName(EntityId eId) const override {
+    if (eId >= mEntityDescs.size() || eId == INVALID_ENTITY_ID) {
+      return "<Uknown/Invalid Entity>!";
+    }
+
     return mEntityDescs[eId].name.c_str();
+  };
+
+  void setName(EntityId eId, const char *name) override {
+    if (eId >= mEntityDescs.size() || eId == INVALID_ENTITY_ID) {
+      spdlog::error("Cannot rename invalid entity!");
+      return;
+    }
+
+    mEntityDescs[eId].name = name;
   };
 
 protected:
   void *addComponent(EntityId eId, ComponentId componentId, void *data,
-                     uint32_t len) override {
+                     uint32_t len, uint32_t alignment) override {
     EntityDesc *desc = &mEntityDescs[eId];
 
     // Cache component size
     if (mComponentDescs.find(componentId) == mComponentDescs.end()) {
-      spdlog::trace("Component define with size {} bytes!", len);
+      spdlog::trace("Component defined with {} bytes!", len);
       mComponentDescs[componentId].size = len;
+      mComponentDescs[componentId].alignment = alignment;
     }
 
     const ComponentBitset prevArchetypeId = desc->componentMask;
@@ -175,17 +237,21 @@ protected:
 
     // Check if new archetype
     if (mArchetypes.find(newArchetypeId) == mArchetypes.end()) {
-      ArchetypeContainer &container = mArchetypes[newArchetypeId];
-      // Add to entity components size
-      desc->componentsIds.push_back(componentId);
+      ArchetypeContainer &newContainer = mArchetypes[newArchetypeId];
+      newContainer.init(this);
 
-      container.init();
-
+      // Previous components
       for (ComponentId id : desc->componentsIds) {
-        container.addArchetypeType(id, mComponentDescs[id].size);
+        newContainer.addArchetypeType(id, mComponentDescs[id].size,
+                                      mComponentDescs[id].alignment);
       }
 
-      container.fini();
+      // New component
+      newContainer.addArchetypeType(componentId,
+                                    mComponentDescs[componentId].size,
+                                    mComponentDescs[componentId].alignment);
+
+      newContainer.fini();
     } else {
       auto it = std::find(desc->componentsIds.begin(),
                           desc->componentsIds.end(), componentId);
@@ -195,20 +261,18 @@ protected:
         spdlog::warn("Entity already has component!");
         return getComponent(eId, componentId);
       }
-
-      // Add to entity components size
-      desc->componentsIds.push_back(componentId);
     }
 
     ArchetypeContainer &newContainer = mArchetypes[newArchetypeId];
 
+    // Check if switched archetype
     if (newArchetypeId != prevArchetypeId) {
       // Remove from previous archetype container
       if (mArchetypes.find(prevArchetypeId) != mArchetypes.end()) {
         ArchetypeContainer &prevContainer = mArchetypes[prevArchetypeId];
         void *prevData = prevContainer.popArchetype(eId);
 
-        // Copy previous type data to new archetype container
+        // Copy overlapping components to new archetype container
         for (ComponentId componentId : desc->componentsIds) {
           newContainer.pushComponent(
               eId, componentId,
@@ -217,6 +281,8 @@ protected:
         }
       }
 
+      // Update entity description
+      desc->componentsIds.push_back(componentId);
       desc->componentMask = newArchetypeId;
       return newContainer.pushComponent(eId, componentId, data);
     }
@@ -226,8 +292,32 @@ protected:
 
   void *getComponent(EntityId eId, ComponentId componentID) override {
     EntityDesc &desc = mEntityDescs[eId];
+
+    if (!hasComponent(eId, componentID)) {
+      spdlog::error("Entity has no component #{}", componentID);
+      return NULL;
+    }
+
     return mArchetypes[desc.componentMask].getComponent(eId, componentID);
   }
+
+  bool hasComponent(EntityId eId, ComponentId componentID) const override {
+    const EntityDesc &desc = mEntityDescs[eId];
+
+    ComponentBitset componentMask = {};
+    componentMask.set(componentID);
+    if ((desc.componentMask & componentMask) != componentMask) {
+      return false;
+    }
+
+    return true;
+  }
+
+  void forEachEntity(std::function<void(EntityId)> fn) override {
+    for (size_t i = 0; i < mEntityDescs.size(); i++) {
+      fn(EntityId{static_cast<uint32_t>(i)});
+    }
+  };
 
   void removeComponent(EntityId e, ComponentId componentID) override {
     uint32_t _ = e = componentID;
@@ -237,6 +327,8 @@ private:
   struct EntityDesc {
     std::string name;
     ComponentBitset componentMask;
+
+    // TODO: Remove only use bitmask
     std::vector<ComponentId> componentsIds;
   };
 
@@ -245,21 +337,12 @@ private:
   struct ComponentDesc {
     std::string name;
     uint32_t size;
+    uint32_t alignment;
   };
 
   std::unordered_map<ComponentId, ComponentDesc> mComponentDescs;
-
-  std::vector<cbz::ecs::ISystem> mSystems;
 };
 
-cbz::ecs::IWorld *sWorld = nullptr;
-cbz::ecs::IWorld *InitWorld() {
-  sLogger = spdlog::stdout_color_mt("cbz");
-  sLogger->set_level(spdlog::level::trace);
-  sLogger->set_pattern("[%^%l%$][CBZ] %v");
-
-  sWorld = new cbz::ecs::World();
-  return sWorld;
-};
+cbz::ecs::IWorld *InitWorld() { return new cbz::ecs::World(); };
 
 } // namespace cbz::ecs
