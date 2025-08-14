@@ -177,7 +177,7 @@ public:
       return {INVALID_ENTITY_ID, this};
     }
 
-    EntityId id = mEntityDescs.size();
+    EntityId id = static_cast<uint32_t>(mEntityDescs.size());
     mEntityDescs.push_back({});
 
     if (name) {

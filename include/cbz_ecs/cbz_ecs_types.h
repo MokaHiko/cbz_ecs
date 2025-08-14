@@ -18,7 +18,6 @@ typedef EntityId ComponentId;
 #include <bitset>
 #include <cstdint>
 #include <functional>
-#include <stdint.h>
 #include <utility>
 
 #include <unordered_map>
@@ -199,7 +198,6 @@ protected:
   std::unordered_map<ComponentBitset, ArchetypeContainer> mArchetypes;
 };
 
-// TODO: Make entity hold reference to world
 extern cbz::ecs::IWorld *InitWorld();
 
 class Entity {

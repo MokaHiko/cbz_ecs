@@ -19,7 +19,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 )
 
 if (MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4)
+    # target_compile_options(${PROJECT_NAME} PRIVATE /W4)
 else()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -pedantic)
     target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address)
