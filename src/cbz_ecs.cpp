@@ -4,6 +4,8 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+
 void Transform::setParent(cbz::ecs::Entity parentId) {
   cbz::ecs::Entity parent(parentId);
 
@@ -187,7 +189,7 @@ public:
     return {id, this};
   }
 
-  void step(double _) override {
+  void step([[maybe_unused]] double _) override {
     for (auto &systemFn : mySystems) {
       systemFn();
     }
