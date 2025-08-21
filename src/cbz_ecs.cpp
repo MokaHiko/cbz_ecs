@@ -31,6 +31,7 @@ ArchetypeContainer::Iterator::Iterator(uint8_t *dataPtr,
 
 void ArchetypeContainer::init(IWorld *world) {
   mWorld = world;
+
   // Prepend archetype with entityID
   addArchetypeType(GetComponentId<Entity>(), sizeof(Entity), alignof(Entity));
 }
@@ -115,7 +116,7 @@ void *ArchetypeContainer::pushComponent(cbz::ecs::EntityId eId,
   // Entity is always the first component in the archetype
   Entity e(eId, mWorld);
   memcpy(mArchetypeBuffer.data() + (mEntityIndex[eId] * mArchetypeWholeSize),
-         &e, sizeof(cbz::ecs::Entity));
+         &e, sizeof(Entity));
 
   // Copy component data
   void *out = mArchetypeBuffer.data() + globalComponentOffset;
@@ -130,8 +131,9 @@ void *ArchetypeContainer::popArchetype(EntityId eId) {
     return nullptr;
   }
 
-  const size_t offsetToFree =
-      (getEntityArchetypeIndex(eId) * mArchetypeWholeSize);
+  const uint32_t freeIndex = getEntityArchetypeIndex(eId);
+  const size_t offsetToFree = freeIndex * mArchetypeWholeSize;
+
   const size_t tempOffset = (mCount * mArchetypeWholeSize);
 
   // Guarantee required size
@@ -144,14 +146,20 @@ void *ArchetypeContainer::popArchetype(EntityId eId) {
   memcpy(mArchetypeBuffer.data() + tempOffset,
          mArchetypeBuffer.data() + offsetToFree, mArchetypeWholeSize);
 
-  // Copy end to newly freed offset
-  const size_t endOffset = (mCount - 1) * mArchetypeWholeSize;
+  // Copy end element to newly freed offset
+  const uint32_t endIndex = mCount - 1;
+  const size_t endOffset = endIndex * mArchetypeWholeSize;
   if (offsetToFree != endOffset) {
     memcpy(mArchetypeBuffer.data() + offsetToFree,
            mArchetypeBuffer.data() + endOffset, mArchetypeWholeSize);
   }
 
-  // Decrement count
+  // Reassign swapped entity to freed index
+  Entity swappedEntity = *(Entity *)(mArchetypeBuffer.data() + offsetToFree);
+  mEntityIndex[swappedEntity.getId()] = freeIndex;
+  mEntityIndex.erase(eId);
+
+  // Decrement count & remove from map
   --mCount;
 
   // Return archetype at tmp offset

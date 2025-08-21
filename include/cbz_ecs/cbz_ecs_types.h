@@ -278,6 +278,12 @@ struct Rotation {
   float y = 0.0f;
   float z = 0.0f;
 
+  Rotation() = default;
+  Rotation(float w_, float x_, float y_, float z_)
+      : w(w_), x(x_), y(y_), z(z_) {}
+
+  Rotation(const glm::quat &q) : w(q.w), x(q.x), y(q.y), z(q.z) {}
+
   operator glm::quat() const { return glm::quat(w, x, y, z); }
 
   // Sets the rotation given euler angles in RADIANS.
@@ -287,6 +293,20 @@ struct Rotation {
     glm::quat rotZ = glm::angleAxis(zRadians, glm::vec3(0, 0, 1));
 
     glm::quat rotation = rotZ * rotY * rotX; // ZYX order
+
+    // Update this object
+    w = rotation.w;
+    x = rotation.x;
+    y = rotation.y;
+    z = rotation.z;
+  }
+
+  void rotateEuler(float xRadians, float yRadians, float zRadians) {
+    glm::quat rotX = glm::angleAxis(xRadians, glm::vec3(1, 0, 0));
+    glm::quat rotY = glm::angleAxis(yRadians, glm::vec3(0, 1, 0));
+    glm::quat rotZ = glm::angleAxis(zRadians, glm::vec3(0, 0, 1));
+
+    glm::quat rotation = glm::quat(*this) * rotZ * rotY * rotX; // ZYX order
 
     // Update this object
     w = rotation.w;
